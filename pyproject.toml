@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qkview-skill"
+version = "0.1.0"
+description = "Analyze BIG-IP QKViews uploaded to F5 iHealth"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "OpenCode" }]
+
+[tool.setuptools]
+packages = ["qkview_skill"]

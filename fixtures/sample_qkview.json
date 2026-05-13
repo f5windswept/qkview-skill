@@ -1,0 +1,40 @@
+{
+  "qkview_id": "sample-001",
+  "summary": {
+    "hostname": "prod-bigip-a.example.com",
+    "tmos_version": "14.1.5.6",
+    "platform": "i5800",
+    "uptime": "37 days",
+    "sync_status": "Changes Pending",
+    "failover_status": "Active",
+    "disk_usage": 87,
+    "expired_certificates": [
+      "/Common/example.com"
+    ]
+  },
+  "diagnostics": [
+    {
+      "severity": "critical",
+      "title": "TMM restart detected",
+      "detail": "TMM restarted twice in the last 24 hours.",
+      "recommendation": "Inspect core files and correlate with recent traffic spikes or config changes."
+    },
+    {
+      "severity": "warning",
+      "title": "NTP drift",
+      "detail": "Clock drift is outside the recommended threshold."
+    }
+  ],
+  "metrics": {
+    "cpu_utilization": 92,
+    "memory_used": 84,
+    "swap_usage": 3,
+    "throughput_bits": 3500000000,
+    "ssl_tps": 2500,
+    "active_connections": 56000,
+    "http_requests": 12000
+  },
+  "metadata": {
+    "captured_at": "2026-03-31T12:00:00Z"
+  }
+}
