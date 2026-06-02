@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import uuid
 import urllib.request
 from pathlib import Path
@@ -104,26 +105,45 @@ def _multipart_body(file_path: Path, boundary: str, mime_type: str) -> bytes:
 
 def blocks_from_report(
     hostname: str,
-    report: Dict[str, List[str]],
+    report: Dict,
     uploaded_file_ids: Iterable[str],
     graph_groups: Optional[Sequence[Tuple[str, Sequence[Tuple[str, str]]]]] = None,
 ) -> List[Dict]:
-    children: List[Dict] = [
-        heading_2(hostname),
-        bulleted_section("Scope", report["scope"]),
-        bulleted_section("System Summary", report.get("system_summary", [])),
-        bulleted_section("Executive Assessment", report["executive_assessment"]),
-        bulleted_section("Critical Findings", report["critical_findings"] or ["None noted."]),
-        bulleted_section("Warnings", report["warnings"] or ["None noted."]),
-        bulleted_section("Performance Notes", report["performance_notes"]),
-        bulleted_section("Configuration Notes", report["configuration_notes"]),
-        bulleted_section("Virtual Edition Recommendation", report.get("ve_recommendation", [])),
-        numbered_section("Recommended Next Actions", report["recommended_next_actions"]),
-    ]
+    header = report.get("header") or {}
+    children: List[Dict] = [heading_2(header.get("hostname") or hostname)]
+
+    subtitle = header.get("subtitle")
+    if subtitle:
+        children.append(caption_paragraph(subtitle))
+
+    children.extend(_bullet_section("Scope", report.get("scope", [])))
+
+    system_summary = report.get("system_summary") or []
+    if system_summary:
+        children.append(heading_3("System Summary"))
+        children.append(key_value_table(system_summary))
+
+    diagnostics_line = report.get("diagnostics_line")
+    if diagnostics_line:
+        children.append(heading_3("Diagnostics"))
+        children.append(callout(diagnostics_line))
+
+    children.extend(_bullet_section("Executive Assessment", report.get("executive_assessment", [])))
+    children.extend(_bullet_section("Critical Findings", report.get("critical_findings") or ["None noted."]))
+    children.extend(_bullet_section("Warnings", report.get("warnings") or ["None noted."]))
+    children.extend(_bullet_section("Performance Notes", report.get("performance_notes", [])))
+    children.extend(_bullet_section("Configuration Notes", report.get("configuration_notes", [])))
+    children.extend(_bullet_section("Virtual Edition", report.get("ve_recommendation", [])))
+
+    actions = report.get("recommended_next_actions", [])
+    if actions:
+        children.append(heading_3("Recommended Next Actions"))
+        children.extend(numbered(item) for item in actions)
+
     if graph_groups:
         children.append(heading_3("Utilization Graphs"))
         for group_title, items in graph_groups:
-            children.append(heading_3(group_title))
+            children.append(bold_paragraph(group_title))
             for upload_id, caption in items:
                 children.append(image_block(upload_id, caption))
     else:
@@ -132,57 +152,105 @@ def blocks_from_report(
     return children
 
 
+def _bullet_section(title: str, items: Sequence[str]) -> List[Dict]:
+    if not items:
+        return []
+    blocks: List[Dict] = [heading_3(title)]
+    blocks.extend(bullet(item) for item in items)
+    return blocks
+
+
+_MARKUP_RE = re.compile(r"\*\*(.+?)\*\*|`([^`]+)`")
+
+
+def rich_text(text: str) -> List[Dict]:
+    """Convert lightweight markup (**bold**, `code`) into Notion rich_text segments."""
+    segments: List[Dict] = []
+    pos = 0
+    for match in _MARKUP_RE.finditer(text):
+        if match.start() > pos:
+            segments.append(_segment(text[pos:match.start()]))
+        if match.group(1) is not None:
+            segments.append(_segment(match.group(1), bold=True))
+        else:
+            segments.append(_segment(match.group(2), code=True))
+        pos = match.end()
+    if pos < len(text):
+        segments.append(_segment(text[pos:]))
+    return segments or [_segment("")]
+
+
+def _segment(content: str, bold: bool = False, code: bool = False, italic: bool = False, color: Optional[str] = None) -> Dict:
+    segment: Dict = {"type": "text", "text": {"content": content}}
+    annotations: Dict = {}
+    if bold:
+        annotations["bold"] = True
+    if code:
+        annotations["code"] = True
+    if italic:
+        annotations["italic"] = True
+    if color:
+        annotations["color"] = color
+    if annotations:
+        segment["annotations"] = annotations
+    return segment
+
+
 def paragraph(text: str) -> Dict:
-    return {
-        "object": "block",
-        "type": "paragraph",
-        "paragraph": {"rich_text": [{"type": "text", "text": {"content": text}}]},
-    }
+    return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": rich_text(text)}}
+
+
+def bold_paragraph(text: str) -> Dict:
+    return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [_segment(text, bold=True)]}}
+
+
+def caption_paragraph(text: str) -> Dict:
+    return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [_segment(text, italic=True, color="gray")]}}
 
 
 def heading_1(text: str) -> Dict:
-    return {"object": "block", "type": "heading_1", "heading_1": {"rich_text": [{"type": "text", "text": {"content": text}}]}}
+    return {"object": "block", "type": "heading_1", "heading_1": {"rich_text": rich_text(text)}}
 
 
 def heading_2(text: str) -> Dict:
-    return {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": text}}]}}
+    return {"object": "block", "type": "heading_2", "heading_2": {"rich_text": rich_text(text)}}
 
 
 def heading_3(text: str) -> Dict:
-    return {"object": "block", "type": "heading_3", "heading_3": {"rich_text": [{"type": "text", "text": {"content": text}}]}}
+    return {"object": "block", "type": "heading_3", "heading_3": {"rich_text": rich_text(text)}}
 
 
-def bulleted_section(title: str, items: List[str]) -> Dict:
+def bullet(text: str) -> Dict:
+    return {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": rich_text(text)}}
+
+
+def numbered(text: str) -> Dict:
+    return {"object": "block", "type": "numbered_list_item", "numbered_list_item": {"rich_text": rich_text(text)}}
+
+
+def callout(text: str) -> Dict:
     return {
         "object": "block",
-        "type": "bulleted_list_item",
-        "bulleted_list_item": {
-            "rich_text": [{"type": "text", "text": {"content": title}}],
-            "children": [
-                {
-                    "object": "block",
-                    "type": "bulleted_list_item",
-                    "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": item}}]},
-                }
-                for item in items
-            ],
-        },
+        "type": "callout",
+        "callout": {"rich_text": rich_text(text), "color": "gray_background"},
     }
 
 
-def numbered_section(title: str, items: List[str]) -> Dict:
+def key_value_table(rows: Sequence[Tuple[str, str]]) -> Dict:
     return {
         "object": "block",
-        "type": "numbered_list_item",
-        "numbered_list_item": {
-            "rich_text": [{"type": "text", "text": {"content": title}}],
+        "type": "table",
+        "table": {
+            "table_width": 2,
+            "has_column_header": False,
+            "has_row_header": True,
             "children": [
                 {
                     "object": "block",
-                    "type": "numbered_list_item",
-                    "numbered_list_item": {"rich_text": [{"type": "text", "text": {"content": item}}]},
+                    "type": "table_row",
+                    "table_row": {"cells": [[_segment(str(label), bold=True)], rich_text(str(value))]},
                 }
-                for item in items
+                for label, value in rows
             ],
         },
     }

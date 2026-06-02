@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from qkview_skill.html_parsers import flatten_sections, parse_diagnostic_counts, parse_graph_names, parse_high_availability_summary, parse_provisioned_modules, parse_sections
 from qkview_skill.ihealth_client import IHealthClient, IHealthClientError
 from qkview_skill.live_analysis import build_live_report, fallback_graph_metrics
-from qkview_skill.notion_client import NotionClient, blocks_from_report, bulleted_section, heading_1, heading_2, paragraph
+from qkview_skill.notion_client import NotionClient, blocks_from_report, bullet, heading_1, heading_2, paragraph
 
 
 GRAPH_GROUPS_REDUCED = [
@@ -191,42 +191,67 @@ def _first_value(*values: str | None) -> str:
     return ""
 
 
-def render_markdown_report(report: dict[str, list[str]]) -> str:
-    sections = [
-        ("Scope", report["scope"]),
-        ("System Summary", report.get("system_summary", [])),
-        ("Executive Assessment", report["executive_assessment"]),
-        ("Critical Findings", report["critical_findings"] or ["None noted."]),
-        ("Warnings", report["warnings"] or ["None noted."]),
-        ("Performance Notes", report["performance_notes"]),
-        ("Configuration Notes", report["configuration_notes"]),
-        ("Virtual Edition Recommendation", report.get("ve_recommendation", [])),
-    ]
-    lines = ["BIG-IP QKView Analysis", ""]
-    for title, items in sections:
-        lines.append(title)
-        for item in items:
-            lines.append(f"- {item}")
+def render_markdown_report(report: dict) -> str:
+    header = report.get("header") or {}
+    hostname = header.get("hostname", "BIG-IP")
+    lines = [f"# BIG-IP QKView Analysis — {hostname}", ""]
+    subtitle = header.get("subtitle")
+    if subtitle:
+        lines.append(f"*{subtitle}*")
         lines.append("")
-    lines.append("Recommended Next Actions")
-    for index, item in enumerate(report["recommended_next_actions"], start=1):
-        lines.append(f"{index}. {item}")
-    return "\n".join(lines) + "\n"
+
+    def add_bullets(title: str, items: list) -> None:
+        if not items:
+            return
+        lines.append(f"## {title}")
+        lines.extend(f"- {item}" for item in items)
+        lines.append("")
+
+    add_bullets("Scope", report.get("scope", []))
+
+    system_summary = report.get("system_summary") or []
+    if system_summary:
+        lines.append("## System Summary")
+        lines.append("| Field | Value |")
+        lines.append("| --- | --- |")
+        lines.extend(f"| {label} | {value} |" for label, value in system_summary)
+        lines.append("")
+
+    diagnostics_line = report.get("diagnostics_line")
+    if diagnostics_line:
+        lines.append("## Diagnostics")
+        lines.append(diagnostics_line)
+        lines.append("")
+
+    add_bullets("Executive Assessment", report.get("executive_assessment", []))
+    add_bullets("Critical Findings", report.get("critical_findings") or ["None noted."])
+    add_bullets("Warnings", report.get("warnings") or ["None noted."])
+    add_bullets("Performance Notes", report.get("performance_notes", []))
+    add_bullets("Configuration Notes", report.get("configuration_notes", []))
+    add_bullets("Virtual Edition", report.get("ve_recommendation", []))
+
+    actions = report.get("recommended_next_actions", [])
+    if actions:
+        lines.append("## Recommended Next Actions")
+        lines.extend(f"{index}. {item}" for index, item in enumerate(actions, start=1))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def build_estate_summary(records: list[HostSummary]) -> list[str]:
     total_hosts = len(records)
+    total_critical = sum(int(record["diagnostic_counts"].get("critical", 0)) for record in records)
     total_high = sum(int(record["diagnostic_counts"].get("high", 0)) for record in records)
     total_medium = sum(int(record["diagnostic_counts"].get("medium", 0)) for record in records)
     total_low = sum(int(record["diagnostic_counts"].get("low", 0)) for record in records)
     highest_load = max(records, key=lambda record: float(record["load_1"])) if records else None
     summary = [
-        f"Reviewed `{total_hosts}` BIG-IP hosts with `{total_high}` high, `{total_medium}` medium, and `{total_low}` low iHealth findings in aggregate.",
-        "All per-host reports were generated only after required Status->Overview System fields, diagnostics counts, and provisioned modules were validated.",
+        f"Reviewed **{total_hosts}** BIG-IP {'host' if total_hosts == 1 else 'hosts'} — "
+        f"**{total_critical} critical** · **{total_high} high** · {total_medium} medium · {total_low} low findings in aggregate.",
     ]
     if highest_load is not None:
         summary.append(
-            f"The highest snapshot load average in this set was on `{highest_load['hostname']}` at `{highest_load['load_average']}`.")
+            f"Highest snapshot load average: `{highest_load['hostname']}` at `{highest_load['load_average']}`.")
     return summary
 
 
@@ -510,8 +535,8 @@ def main() -> int:
 
     if host_summaries:
         children[2:2] = [
-            heading_2("Executive Summary"),
-            bulleted_section("Estate Summary", build_estate_summary(host_summaries)),
+            heading_2("Estate Summary"),
+            *[bullet(item) for item in build_estate_summary(host_summaries)],
         ]
 
     summary_path = run_dir / "index.md"

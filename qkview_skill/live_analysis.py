@@ -50,90 +50,119 @@ def build_live_report(
         "unknown",
     )
     modules = ", ".join(provisioned_modules) if provisioned_modules else "none surfaced as nominal"
-    ha_state, ha_summary = _summarize_high_availability(high_availability)
+    ha_state, is_ha_pair, ha_peer = _summarize_high_availability(high_availability)
+    ha_short = _ha_short(ha_state, is_ha_pair, ha_peer, bool(high_availability))
     version = _first_value(record.get("version"), overview.get("Version - Edition"), "unknown-version")
     platform = _first_value(record.get("platform"), overview.get("Platform"), "unknown-platform")
-    system_summary = [
-        f"Hostname: `{hostname}`.",
-        f"Time zone: `{time_zone}`.",
-        f"Appliance serial: `{appliance_serial}`.",
-        f"Blade serial: `{blade_serial}`.",
-        f"Status: `{status}`.",
-        f"Uptime: `{uptime}`.",
-        f"Load average: `{load_1:.2f}` / `{load_5:.2f}` / `{load_15:.2f}`.",
-        f"Physical memory: `{physical_memory}`.",
-        f"CPU totals: `{cpu_totals}`.",
-        f"High availability: {ha_summary}",
-    ]
+    load_text = f"{load_1:.2f} / {load_5:.2f} / {load_15:.2f}"
 
+    # Raw facts live once, in the System Summary table. Other sections interpret rather than repeat.
+    system_summary: List[tuple[str, str]] = [
+        ("Status", status),
+        ("Uptime", uptime),
+        ("Load average (1/5/15m)", load_text),
+        ("Physical memory", physical_memory),
+        ("CPU", cpu_totals),
+        ("High availability", ha_short),
+        ("Provisioned modules", modules),
+        ("Object counts", f"{virtuals} virtuals / {pools} pools / {nodes} nodes / {monitors} monitors"),
+        ("Time zone", time_zone),
+        ("Appliance serial", appliance_serial),
+    ]
+    if _has_meaningful_value(blade_serial):
+        system_summary.append(("Blade serial", blade_serial))
+
+    critical_count = diagnostics.get("critical", 0)
     high_count = diagnostics.get("high", 0)
     medium_count = diagnostics.get("medium", 0)
     low_count = diagnostics.get("low", 0)
-    critical_count = diagnostics.get("critical", 0)
+    diagnostics_line = (
+        f"**{critical_count} critical** · **{high_count} high** · "
+        f"{medium_count} medium · {low_count} low"
+    )
 
     executive = [
-        f"Host `{hostname}` runs `{version}` on `{platform}` with QKView `{record['qkview_id']}`.",
-        f"iHealth diagnostics show `{critical_count}` critical, `{high_count}` high, `{medium_count}` medium, and `{low_count}` low findings.",
-        f"The device reports status `{status}` with uptime `{uptime}`.",
-        f"Status -> High Availability indicates {ha_summary}",
+        f"`{hostname}` runs `{version}` on `{platform}` (QKView `{record['qkview_id']}`).",
+        _overall_health_line(critical_count, high_count, status, ha_short),
     ]
 
     critical_findings: List[str] = []
     warnings: List[str] = []
 
     if critical_count:
-        critical_findings.append(f"iHealth flagged `{critical_count}` critical findings for this BIG-IP.")
+        critical_findings.append(
+            f"iHealth reports **{critical_count} {_plural(critical_count, 'critical finding')}** — "
+            "review the Diagnostics tab before the next change window."
+        )
     if high_count:
-        critical_findings.append(f"iHealth flagged `{high_count}` high-severity findings that should be reviewed before the next change window.")
-    if not critical_findings:
-        warnings.append("No critical iHealth findings were visible in the current diagnostics summary.")
+        critical_findings.append(
+            f"**{high_count} {_plural(high_count, 'high-severity finding')}** flagged — "
+            "triage these against the current incident or maintenance scope."
+        )
+    if not critical_count and not high_count:
+        warnings.append("No critical or high-severity iHealth findings in the current diagnostics summary.")
+    if medium_count or low_count:
+        warnings.append(
+            f"{medium_count} medium and {low_count} low findings remain for routine cleanup."
+        )
 
     if load_1 >= 4.0:
-        warnings.append(f"Load average is elevated at `{load_1:.2f}` / `{load_5:.2f}` / `{load_15:.2f}`.")
+        performance_notes = [
+            f"Load average is elevated at `{load_text}` — investigate CPU saturation against the graphs below."
+        ]
     else:
-        warnings.append(f"Load average is `{load_1:.2f}` / `{load_5:.2f}` / `{load_15:.2f}`, which does not immediately suggest CPU saturation.")
+        performance_notes = [
+            f"Load average `{load_text}` shows headroom; no sustained CPU saturation in this snapshot."
+        ]
+    performance_notes.append(
+        "Compare the 30-day CPU, memory, throughput, connection, and SSL graphs below against the incident window."
+    )
 
-    performance_notes = [
-        f"Load average: `{load_1:.2f}` / `{load_5:.2f}` / `{load_15:.2f}`.",
-        f"Physical memory reported by iHealth: `{physical_memory}`.",
-        f"CPU inventory reported by iHealth: `{cpu_totals}`.",
-    ]
-
-    configuration_notes = [
-        f"Platform: `{platform}`.",
-        f"Software version: `{version}`.",
-        f"Provisioned modules from Status -> Overview / Licensing and Provisioning where Provisioned = Nominal: `{modules}`.",
-        f"HA posture from Status -> High Availability: {ha_summary}",
-        f"Object counts: virtuals `{virtuals}`, pools `{pools}`, nodes `{nodes}`, monitor instances `{monitors}`.",
-        f"Device serial: `{appliance_serial}`.",
-    ]
-
+    configuration_notes: List[str] = []
     if any(version.startswith(prefix) for prefix in ("11.", "12.", "13.", "14.")):
-        configuration_notes.append("This TMOS train is old enough that lifecycle and hotfix posture should be reviewed carefully.")
+        configuration_notes.append(
+            f"`{version}` is an older TMOS train — review lifecycle and hotfix posture carefully."
+        )
+    if is_ha_pair:
+        configuration_notes.append(f"Configured as an HA pair; current role is {ha_short}.")
+    elif high_availability:
+        configuration_notes.append("No HA pair detected on the Status -> High Availability page.")
+    else:
+        configuration_notes.append("Status -> High Availability was not available this run; HA posture unconfirmed.")
+    if not provisioned_modules:
+        configuration_notes.append("No modules surfaced as Provisioned = Nominal; confirm provisioning expectations.")
 
     next_actions = [
-        "Review the high-severity iHealth findings in the Diagnostics tab and confirm whether any map directly to the current incident or maintenance scope.",
-        "Validate software support status and hotfix posture for the running TMOS version before planning the next upgrade or remediation window.",
-        "Compare the attached utilization graphs against the incident window to confirm whether CPU, memory, throughput, connection rate, or SSL load spikes align with the reported symptoms.",
+        "Review the high-severity iHealth findings and confirm whether any map to the current incident or maintenance scope.",
+        "Validate software support status and hotfix posture for the running TMOS version before the next upgrade window.",
+        "Compare the utilization graphs against the incident window to confirm whether CPU, memory, throughput, connection, or SSL load aligns with the reported symptoms.",
     ]
-
-    ve_recommendation = [
-        "Evaluate replacing this hardware BIG-IP with BIG-IP Virtual Edition as part of the next refresh cycle.",
-        f"Current system data shows platform `{platform}`, CPU inventory `{cpu_totals}`, physical memory `{physical_memory}`, and load average `{load_1:.2f}` / `{load_5:.2f}` / `{load_15:.2f}`, which is useful input for VE sizing.",
-        "Size the VE using F5 guidance from K14810 and select vCPU, RAM, and licensed throughput tier based on the 30-day utilization graphs plus growth headroom rather than matching hardware model names directly.",
-        "Preserve HA design, module requirements, SSL/TLS load, and peak throughput/connections when choosing the VE entitlement and hypervisor footprint.",
-    ]
-
-    if any(term in ha_state.lower() for term in ("standby", "active", "offline", "failover")):
+    if is_ha_pair:
         next_actions.append("Confirm HA state and failover expectations on the peer device before making configuration changes.")
 
+    ve_recommendation = [
+        "Consider migrating to BIG-IP Virtual Edition at the next refresh cycle.",
+        "Size vCPU, RAM, and the licensed throughput tier per F5 K14810 using the 30-day graphs below plus growth headroom — not the hardware model. Preserve HA design, provisioned modules, SSL/TLS load, and peak throughput/connections when choosing the VE entitlement.",
+    ]
+
+    scope = [f"Uploader: `{record['uploader_email']}`"]
+    generation_date = _first_value(record.get("generation_date"))
+    if generation_date:
+        scope.append(f"QKView `{record['qkview_id']}` generated `{generation_date}`")
+    else:
+        scope.append(f"QKView `{record['qkview_id']}`")
+    last_viewed = _first_value(record.get("last_viewed"))
+    if last_viewed:
+        scope.append(f"Last viewed in iHealth: `{last_viewed}`")
+
     return {
-        "scope": [
-            f"Uploader email: `{record['uploader_email']}`",
-            f"Uploaded file: `{record['uploaded_file']}` generated `{record['generation_date']}`",
-            f"Last viewed in iHealth: `{record['last_viewed']}`",
-        ],
+        "header": {
+            "hostname": hostname,
+            "subtitle": f"{version} · {platform} · QKView {record['qkview_id']}",
+        },
+        "scope": scope,
         "system_summary": system_summary,
+        "diagnostics_line": diagnostics_line,
         "executive_assessment": executive,
         "critical_findings": critical_findings,
         "warnings": warnings,
@@ -142,6 +171,29 @@ def build_live_report(
         "ve_recommendation": ve_recommendation,
         "recommended_next_actions": _dedupe(next_actions),
     }
+
+
+def _plural(count: int, singular: str) -> str:
+    return singular if count == 1 else f"{singular}s"
+
+
+def _overall_health_line(critical: int, high: int, status: str, ha_short: str) -> str:
+    if critical:
+        health = "needs attention — critical findings present"
+    elif high:
+        health = "has high-severity findings to triage"
+    else:
+        health = "looks healthy with no critical or high findings"
+    return f"Overall, this device {health}. Status: `{status}`; HA: {ha_short}."
+
+
+def _ha_short(state: str, is_pair: bool, peer: str, page_available: bool) -> str:
+    if is_pair:
+        role = state.title() if state and state != "not surfaced" else "unknown role"
+        return f"{role} (HA pair{', peer ' + peer if peer else ''})"
+    if page_available:
+        return "No HA pair detected"
+    return "Not available"
 
 
 def fallback_graph_metrics(record: Dict[str, str], overview: Dict[str, str], hardware: Dict[str, str], diagnostics: Dict[str, int]) -> Dict[str, List[float]]:
@@ -173,7 +225,8 @@ def _first_value(*values: str | None) -> str:
     return ""
 
 
-def _summarize_high_availability(high_availability: Dict[str, str]) -> tuple[str, str]:
+def _summarize_high_availability(high_availability: Dict[str, str]) -> tuple[str, bool, str]:
+    """Return (failover_state, is_ha_pair, peer)."""
     state = _first_value(
         _lookup_value(high_availability, "failover", "state"),
         _lookup_value(high_availability, "redundancy", "state"),
@@ -187,17 +240,12 @@ def _summarize_high_availability(high_availability: Dict[str, str]) -> tuple[str
         _lookup_value(high_availability, "peer", "address"),
         _lookup_value(high_availability, "peer", "ip"),
     )
-    has_pair_markers = any(
+    is_ha_pair = any(
         _has_meaningful_value(value)
         for key, value in high_availability.items()
         if any(term in key.lower() for term in ("peer", "failover", "redundancy", "device group", "traffic group", "configsync", "config sync"))
     )
-    if has_pair_markers:
-        peer_text = f" with peer `{peer}`" if peer else ""
-        return state, f"this device is configured as an HA pair and is currently `{state}`{peer_text}."
-    if high_availability:
-        return state, "the iHealth High Availability page did not surface evidence that this device is configured as an HA pair."
-    return state, "the iHealth High Availability page was not available during this run."
+    return state, is_ha_pair, peer
 
 
 def _lookup_value(values: Dict[str, str], *terms: str) -> str:

@@ -92,8 +92,10 @@ class AnalyzerTests(unittest.TestCase):
             provisioned_modules=["LTM", "ASM"],
         )
 
-        self.assertTrue(any("configured as an HA pair" in item for item in report["system_summary"]))
-        self.assertTrue(any("Provisioned = Nominal: `LTM, ASM`" in item for item in report["configuration_notes"]))
+        summary = dict(report["system_summary"])
+        self.assertIn("HA pair", summary["High availability"])
+        self.assertEqual(summary["Provisioned modules"], "LTM, ASM")
+        self.assertTrue(any("HA pair" in note for note in report["configuration_notes"]))
 
     def test_parse_high_availability_summary_reads_sync_failover_pair(self) -> None:
         html = """
